@@ -1,16 +1,27 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
-func getListenerUpstream() (tcp_listener_upstream_all []TcpListenerUpstream) {
-	upstream_1 := []IpPort{
+func getListenerUpstream() (tcp_listener_upstream_all TcpListenerUpstreamSlice) {
+	upstream_1 := UpStreamSlice{
 		{
-			Ip:   [4]byte{10, 5, 5, 20},
-			Port: 28080,
+			IpPort: IpPort{
+				Ip:   [4]byte{10, 5, 5, 20},
+				Port: 28080,
+			},
+			IsHealthy:         true,
+			HealthyUpdateTime: time.Now(),
 		},
 		{
-			Ip:   [4]byte{10, 5, 5, 20},
-			Port: 18080,
+			IpPort: IpPort{
+				Ip:   [4]byte{10, 5, 5, 20},
+				Port: 18080,
+			},
+			IsHealthy:         true,
+			HealthyUpdateTime: time.Now(),
 		},
 	}
 	listener_upstream_1 := TcpListenerUpstream{
@@ -18,17 +29,25 @@ func getListenerUpstream() (tcp_listener_upstream_all []TcpListenerUpstream) {
 			Port: 30880,
 			Ip:   [4]byte{0, 0, 0, 0},
 		},
-		Upstream: upstream_1,
+		Upstream: &upstream_1,
 	}
 
-	upstream_2 := []IpPort{
+	upstream_2 := UpStreamSlice{
 		{
-			Ip:   [4]byte{10, 5, 5, 21},
-			Port: 22,
+			IpPort: IpPort{
+				Ip:   [4]byte{10, 5, 5, 21},
+				Port: 22,
+			},
+			IsHealthy:         true,
+			HealthyUpdateTime: time.Now(),
 		},
 		{
-			Ip:   [4]byte{10, 5, 5, 20},
-			Port: 22,
+			IpPort: IpPort{
+				Ip:   [4]byte{10, 5, 5, 20},
+				Port: 22,
+			},
+			IsHealthy:         true,
+			HealthyUpdateTime: time.Now(),
 		},
 	}
 	listener_upstream_2 := TcpListenerUpstream{
@@ -36,7 +55,7 @@ func getListenerUpstream() (tcp_listener_upstream_all []TcpListenerUpstream) {
 			Port: 30222,
 			Ip:   [4]byte{0, 0, 0, 0},
 		},
-		Upstream: upstream_2,
+		Upstream: &upstream_2,
 	}
 
 	tcp_listener_upstream_all = append(tcp_listener_upstream_all, listener_upstream_1)
@@ -45,78 +64,32 @@ func getListenerUpstream() (tcp_listener_upstream_all []TcpListenerUpstream) {
 	return
 }
 
-func getListenerUpstreamNew() (tcp_listener_upstream_all []TcpListenerUpstream) {
-	upstream_1 := []IpPort{
-		{
-			Ip:   [4]byte{10, 5, 5, 20},
-			Port: 28080,
-		},
-		{
-			Ip:   [4]byte{10, 5, 5, 20},
-			Port: 18080,
-		},
-	}
-	listener_upstream_1 := TcpListenerUpstream{
-		Listener: IpPort{
-			Port: 30880,
-			Ip:   [4]byte{0, 0, 0, 0},
-		},
-		Upstream: upstream_1,
-	}
-
-	// upstream_2 := []IpPort{
-	// 	{
-	// 		Ip:   [4]byte{10, 5, 5, 21},
-	// 		Port: 2222,
-	// 	},
-	// 	{
-	// 		Ip:   [4]byte{10, 5, 5, 20},
-	// 		Port: 22,
-	// 	},
-	// }
-	// listener_upstream_2 := TcpListenerUpstream{
-	// 	Listener: IpPort{
-	// 		Port: 30222,
-	// 		Ip:   [4]byte{0, 0, 0, 0},
-	// 	},
-	// 	Upstream: upstream_2,
-	// }
-
-	upstream_3 := []IpPort{
-		{
-			Ip:   [4]byte{10, 5, 5, 21},
-			Port: 22,
-		},
-		{
-			Ip:   [4]byte{10, 5, 5, 20},
-			Port: 22,
-		},
-	}
-	listener_upstream_3 := TcpListenerUpstream{
-		Listener: IpPort{
-			Port: 30223,
-			Ip:   [4]byte{0, 0, 0, 0},
-		},
-		Upstream: upstream_3,
-	}
-
-	tcp_listener_upstream_all = append(tcp_listener_upstream_all, listener_upstream_1)
-	// tcp_listener_upstream_all = append(tcp_listener_upstream_all, listener_upstream_2)
-	tcp_listener_upstream_all = append(tcp_listener_upstream_all, listener_upstream_3)
-
-	return
-}
-
 func test_compare2Maps() {
 	old := getListenerUpstream()
-	new := getListenerUpstreamNew()
+	// TODO
+	new := getListenerUpstream()
 
 	fmt.Println("old:", old)
 	fmt.Println("new:", new)
 
-	add, del := compare2tcp_listener_upstream_all(old, new)
+	add, del := old.compare2tcp_listener_upstream_all(new)
 
 	fmt.Println("add:", add)
 	fmt.Println("del:", del)
 
+}
+
+func my_temp_test() {
+	// do something
+	// time_1 := time.Now()
+	// time.Sleep(5 * time.Second)
+	// time_2 := time.Now()
+
+	// if time_2.Sub(time_1).Seconds() >= 6 {
+	// 	fmt.Println(true)
+	// } else {
+	// 	fmt.Println(false)
+	// }
+
+	// unix.Exit(0)
 }
