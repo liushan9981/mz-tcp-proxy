@@ -9,42 +9,28 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const LISTENQUEUECOUNT = 1024
-const WORKERCOUNT = 2
-const RECV_SIZE = 4096
-const UpstreamUnhealthyTimeOut = 300
-
 type FD int
 type ConnectionReadStatus struct {
+	Fd      FD
+	ReadEOF bool
+}
+
+type ConnectionInfo struct {
+	ListenFd   FD
+	ListenPort int
+	SA         *unix.Sockaddr
+	Upstream   *UpStream
 	RequestId  string
-	ListenFd   FD
-	ListenPort int
-	Upstream   UpStream
-	Fd         FD
-	SA         unix.Sockaddr
-	ReadEOF    bool
 }
 
-type WorkerInfo struct {
-	EpFd                       FD
-	connCliUpstreamInfo        *(map[FD]*ConnectionReadStatus)
-	mutex_connCliUpstreamInfo  sync.RWMutex
-	events                     []unix.EpollEvent
-	buf                        []byte
-	pbuf                       []byte
-	goroutineIndex             int
-	NewConnectionAll           chan NewConn
-	UpstreamReqCount           map[FD]int
-	UpstreamCurConnCount       map[IpPort]int
-	mutex_UpstreamCurConnCount sync.RWMutex
+type ConnectionInfoStatus struct {
+	*ConnectionInfo
+	ConnectionReadStatus
 }
 
-type NewConn struct {
-	ListenFd   FD
-	ListenPort int
-	CliFd      FD
-	SA         unix.Sockaddr
-	Upstream   *UpStreamSlice
+type NewConnectionInfo struct {
+	CliFd FD
+	*ConnectionInfo
 }
 
 type IpPort struct {
@@ -56,22 +42,42 @@ type UpStream struct {
 	IpPort
 	IsHealthy         bool
 	HealthyUpdateTime time.Time
-	// CurConnCount      int
 }
 type UpStreamSlice []UpStream
 
-type TcpListenerUpstream struct {
-	Listener IpPort
-	Upstream *UpStreamSlice
+type TcpListenIpPortUpstream struct {
+	IpPortListen IpPort
+	Upstream     *UpStreamSlice
 }
 
-type TcpListenerUpstreamSlice []TcpListenerUpstream
+type TcpListenIpPortUpstreamSlice []TcpListenIpPortUpstream
+
+type WorkerInfo struct {
+	EpFd                       FD // epoll使用的fd，client或者upstream来数据时的事件
+	events                     []unix.EpollEvent
+	ConnectionInfoStatus       *(map[FD]*ConnectionInfoStatus) // client fd 映射对应的upstream信息。upstream id映射client信息
+	mutex_ConnectionInfoStatus sync.RWMutex
+	buf                        []byte
+	pbuf                       []byte
+	goroutineIndex             int
+	NewConnectionAll           chan NewConnectionInfo
+	UpstreamReqCount           map[FD]int
+	UpstreamCurConnCount       map[IpPort]int
+	mutex_UpstreamCurConnCount sync.RWMutex
+}
+
+const LISTENQUEUECOUNT = 1024
+const WORKERCOUNT = 2
+const RECV_SIZE = 4096
+const UpstreamUnhealthyTimeOut = 300
 
 var (
-	WorkerInfoAll                  [WORKERCOUNT]WorkerInfo
-	LastTcpListenerUpstreamAll     TcpListenerUpstreamSlice    = make(TcpListenerUpstreamSlice, 1)
-	LISTENFD_2_TcpListenerUpstream map[FD]*TcpListenerUpstream = make(map[FD]*TcpListenerUpstream, 1)
+	WorkerInfoAll                      [WORKERCOUNT]WorkerInfo
+	LastTcpListenIpPortUpstreamAll     TcpListenIpPortUpstreamSlice    = make(TcpListenIpPortUpstreamSlice, 0)    // 当前使用的监听和对应的上游配置
+	ListenFd_2_TcpListenIpPortUpstream map[FD]*TcpListenIpPortUpstream = make(map[FD]*TcpListenIpPortUpstream, 0) // 监听fd和监听端口、upstream的映射
 )
+
+// 分割线
 
 func (epfd FD) add_epoll(fd FD) {
 	err := unix.SetNonblock(int(fd), true)
@@ -107,10 +113,8 @@ func (fd FD) close() {
 func (listen_epfd FD) loop_listen() {
 	events_listen := make([]unix.EpollEvent, 1024)
 	for {
-		// fmt.Println("log_main_go_routine", "begin new epoll-wait")
 		nevents, err := unix.EpollWait(int(listen_epfd), events_listen, -1)
 
-		// handle error
 		if err != nil {
 			// 重启中断的系统调用
 			if err.Error() == "interrupted system call" {
@@ -137,13 +141,14 @@ func (listen_epfd FD) loop_listen() {
 					}
 				}
 				goroutineIndex := cli_fd % WORKERCOUNT
-				WorkerInfoAll[goroutineIndex].NewConnectionAll <- NewConn{CliFd: FD(cli_fd),
-					ListenFd:   listen_fd,
-					Upstream:   (LISTENFD_2_TcpListenerUpstream[listen_fd].Upstream),
-					SA:         sa,
-					ListenPort: ListenSock.(*unix.SockaddrInet4).Port,
+				WorkerInfoAll[goroutineIndex].NewConnectionAll <- NewConnectionInfo{
+					CliFd: FD(cli_fd),
+					ConnectionInfo: &ConnectionInfo{
+						ListenFd:   listen_fd,
+						SA:         &sa,
+						ListenPort: ListenSock.(*unix.SockaddrInet4).Port,
+					},
 				}
-
 			}
 		}
 	}
@@ -188,29 +193,41 @@ func (ip_port IpPort) new_listen() (listen_fd FD) {
 	return
 }
 
-func (workerinfo *WorkerInfo) FinRequest(event_in_fd, event_out_fd FD) {
-	conn_cli_upstream_info := workerinfo.connCliUpstreamInfo
-	workerinfo.mutex_connCliUpstreamInfo.Lock()
+func (workerinfo *WorkerInfo) fin_request(event_in_fd, event_out_fd FD) {
+	conn_cli_upstream_info := workerinfo.ConnectionInfoStatus
+	workerinfo.mutex_ConnectionInfoStatus.Lock()
+	upstream := (*(*workerinfo).ConnectionInfoStatus)[event_in_fd].ConnectionInfo.Upstream
+	// reqid := (*(*workerinfo).ConnectionInfoStatus)[event_in_fd].ConnectionInfo.RequestId
 	fmt.Printf("%s FIN, reqId: %s\n", time.Now().Format("2006-01-02_15:04:05"), (*conn_cli_upstream_info)[event_in_fd].RequestId)
-	upstream := (*conn_cli_upstream_info)[event_in_fd].Upstream
 	delete(*conn_cli_upstream_info, event_out_fd)
 	delete(*conn_cli_upstream_info, event_in_fd)
-	workerinfo.mutex_connCliUpstreamInfo.Unlock()
+	workerinfo.mutex_ConnectionInfoStatus.Unlock()
 
 	event_out_fd.close()
 	event_in_fd.close()
+
 	workerinfo.mutex_UpstreamCurConnCount.Lock()
+	fmt.Println("workerinfo.UpstreamCurConnCount:", workerinfo.UpstreamCurConnCount)
+	fmt.Println("upstream.IpPort:", upstream.IpPort)
 	workerinfo.UpstreamCurConnCount[upstream.IpPort]--
 	workerinfo.mutex_UpstreamCurConnCount.Unlock()
 }
 
-func (wokerinfo *WorkerInfo) handleInData(event_in_fd FD) {
-	buf := &(wokerinfo.buf)
-	pbuf := &(wokerinfo.pbuf)
-	epfd := wokerinfo.EpFd
-	mutex := &(wokerinfo.mutex_connCliUpstreamInfo)
+func (workerinfo *WorkerInfo) handle_error_terminate(event_in_fd, event_out_fd FD) {
+	epfd := workerinfo.EpFd
+	epfd.del_epoll(event_in_fd)
+	epfd.del_epoll(event_out_fd)
+	// 可能有问题，event_in_fd可能在此之前比其他协程使用
+	workerinfo.fin_request(event_in_fd, event_out_fd)
+}
 
-	conn_cli_upstream_info := wokerinfo.connCliUpstreamInfo
+func (workerinfo *WorkerInfo) handle_recv_data(event_in_fd FD) {
+	buf := &(workerinfo.buf)
+	pbuf := &(workerinfo.pbuf)
+	epfd := workerinfo.EpFd
+	mutex := &(workerinfo.mutex_ConnectionInfoStatus)
+
+	conn_cli_upstream_info := workerinfo.ConnectionInfoStatus
 	mutex.RLock()
 	fdOutInfo := (*conn_cli_upstream_info)[event_in_fd]
 	mutex.RUnlock()
@@ -225,17 +242,13 @@ func (wokerinfo *WorkerInfo) handleInData(event_in_fd FD) {
 		case nil:
 			need_break = false
 		case unix.EBADFD:
-			epfd.del_epoll(event_in_fd)
-			epfd.del_epoll(event_out_fd)
 			// 可能有问题，event_in_fd可能在此之前比其他协程使用
-			wokerinfo.FinRequest(event_in_fd, event_out_fd)
+			workerinfo.handle_error_terminate(event_in_fd, event_out_fd)
 		case unix.EAGAIN:
 			// do nothing
 		case unix.ECONNRESET:
-			epfd.del_epoll(event_in_fd)
-			epfd.del_epoll(event_out_fd)
 			// 可能有问题，event_in_fd可能在此之前比其他协程使用
-			wokerinfo.FinRequest(event_in_fd, event_out_fd)
+			workerinfo.handle_error_terminate(event_in_fd, event_out_fd)
 		default:
 			fmt.Println("encounter error:", err)
 		}
@@ -255,7 +268,7 @@ func (wokerinfo *WorkerInfo) handleInData(event_in_fd FD) {
 			mutex.Unlock()
 
 			if is_other_side_eof {
-				wokerinfo.FinRequest(event_in_fd, event_out_fd)
+				workerinfo.fin_request(event_in_fd, event_out_fd)
 			}
 
 			break
@@ -273,9 +286,9 @@ func (wokerinfo *WorkerInfo) handleInData(event_in_fd FD) {
 	}
 }
 
-func (wokerinfo *WorkerInfo) TCPProxyWorker() {
-	epfd := int(wokerinfo.EpFd)
-	events := &(wokerinfo.events)
+func (workerinfo *WorkerInfo) worker_handle_events() {
+	epfd := int(workerinfo.EpFd)
+	events := &(workerinfo.events)
 
 	for {
 		nevents, err := unix.EpollWait(epfd, *events, -1)
@@ -292,14 +305,14 @@ func (wokerinfo *WorkerInfo) TCPProxyWorker() {
 		for ev := 0; ev < nevents; ev++ {
 			event_fd := (*events)[ev].Fd
 			// 处理单次读事件
-			wokerinfo.handleInData(FD(event_fd))
+			workerinfo.handle_recv_data(FD(event_fd))
 		}
 	}
 }
 
-func (workerinfo *WorkerInfo) GetUpstreamRR(new_conn_this_worker NewConn) (upstream UpStream) {
-	upstream_all := new_conn_this_worker.Upstream
-	upstream_all_healthy := make([]UpStream, 0)
+func (workerinfo *WorkerInfo) get_upstream_rr(new_conn_this_worker NewConnectionInfo) (upstream *UpStream) {
+	upstream_all := get_upstreamslice_by_listen_fd(new_conn_this_worker.ListenFd)
+	upstream_all_healthy := make([]*UpStream, 0)
 	listen_fd := new_conn_this_worker.ListenFd
 	upstream_all_req_count := workerinfo.UpstreamReqCount
 	upstream_all_count, ok := upstream_all_req_count[listen_fd]
@@ -310,13 +323,15 @@ func (workerinfo *WorkerInfo) GetUpstreamRR(new_conn_this_worker NewConn) (upstr
 
 	for _, upstream_temp := range *upstream_all {
 		if upstream_temp.IsHealthy {
-			upstream_all_healthy = append(upstream_all_healthy, upstream_temp)
+			upstream_all_healthy = append(upstream_all_healthy, &upstream_temp)
 		}
 	}
 
 	// upstream全部异常，尝试使用所有的
 	if len(upstream_all_healthy) == 0 {
-		upstream_all_healthy = *upstream_all
+		for _, upstream_temp := range *upstream_all {
+			upstream_all_healthy = append(upstream_all_healthy, &upstream_temp)
+		}
 	}
 
 	upstream_i := upstream_all_count % len(upstream_all_healthy)
@@ -325,24 +340,25 @@ func (workerinfo *WorkerInfo) GetUpstreamRR(new_conn_this_worker NewConn) (upstr
 	return
 }
 
-func (workerinfo *WorkerInfo) HandleNewConnWorker() {
-	mutex := &(workerinfo.mutex_connCliUpstreamInfo)
-	connCliUpstreamInfo := workerinfo.connCliUpstreamInfo
+func (workerinfo *WorkerInfo) worker_handle_new_conn() {
+	mutex := &(workerinfo.mutex_ConnectionInfoStatus)
+	connCliUpstreamInfo := workerinfo.ConnectionInfoStatus
 	epfd := workerinfo.EpFd
 
 	for new_conn_this_worker := range workerinfo.NewConnectionAll {
 		// 负载均衡为轮询
 		listen_fd := new_conn_this_worker.ListenFd
-		var upstream UpStream
+		var upstream *UpStream
 		var upstream_fd FD
 		var err error
-		var connect_upstream_max_retries = len(*new_conn_this_worker.Upstream)
+		var upstream_all = ListenFd_2_TcpListenIpPortUpstream[listen_fd].Upstream
+		var connect_upstream_max_retries = len(*upstream_all)
 
 		// 更新upstream健康状态
-		UpdateUpstreamHealth(new_conn_this_worker.Upstream)
+		UpdateUpstreamHealth(upstream_all)
 
 		for m := 0; m < connect_upstream_max_retries; m++ {
-			upstream = workerinfo.GetUpstreamRR(new_conn_this_worker)
+			upstream = workerinfo.get_upstream_rr(new_conn_this_worker)
 			upstream_fd, err = upstream.connect()
 			if err == nil {
 				workerinfo.mutex_UpstreamCurConnCount.Lock()
@@ -350,10 +366,10 @@ func (workerinfo *WorkerInfo) HandleNewConnWorker() {
 				workerinfo.mutex_UpstreamCurConnCount.Unlock()
 				break
 			} else {
-				for n, upstream_temp := range *new_conn_this_worker.Upstream {
-					if upstream_temp == upstream {
-						(*new_conn_this_worker.Upstream)[n].IsHealthy = false
-						(*new_conn_this_worker.Upstream)[n].HealthyUpdateTime = time.Now()
+				for n, upstream_temp := range *upstream_all {
+					if upstream_temp == *upstream {
+						(*upstream_all)[n].IsHealthy = false
+						(*upstream_all)[n].HealthyUpdateTime = time.Now()
 						break
 					}
 				}
@@ -362,7 +378,7 @@ func (workerinfo *WorkerInfo) HandleNewConnWorker() {
 
 		reqId := fmt.Sprintf("%d-%d", workerinfo.goroutineIndex, workerinfo.UpstreamReqCount[listen_fd])
 
-		fmt.Printf("%s goroutine: %d, NEW reqId: %s, ListenFd: %d, ListenPort: %d, Upstream: %v, %d -> srv -> %d, client: %v\n",
+		fmt.Printf("%s goroutine: %d, NEW reqId: %s, ListenFd: %d, ListenPort: %d, Upstream: %v, %d -> srv -> %d, client: %v, connectioninfo: %p\n",
 			time.Now().Format("2006-01-02_15:04:05"),
 			workerinfo.goroutineIndex,
 			reqId,
@@ -371,24 +387,29 @@ func (workerinfo *WorkerInfo) HandleNewConnWorker() {
 			upstream,
 			new_conn_this_worker.CliFd,
 			upstream_fd,
-			new_conn_this_worker.SA.(*unix.SockaddrInet4).Addr,
+			(*new_conn_this_worker.SA).(*unix.SockaddrInet4).Addr,
+			new_conn_this_worker.ConnectionInfo,
 		)
 
 		mutex.Lock()
-		(*connCliUpstreamInfo)[new_conn_this_worker.CliFd] = &ConnectionReadStatus{Fd: upstream_fd,
-			ReadEOF:   false,
-			RequestId: reqId,
-			ListenFd:  listen_fd,
-			Upstream:  upstream,
-			SA:        new_conn_this_worker.SA,
+		(*connCliUpstreamInfo)[new_conn_this_worker.CliFd] = &ConnectionInfoStatus{
+			ConnectionInfo: new_conn_this_worker.ConnectionInfo,
+			ConnectionReadStatus: ConnectionReadStatus{
+				Fd:      upstream_fd,
+				ReadEOF: false,
+			},
 		}
-		(*connCliUpstreamInfo)[upstream_fd] = &ConnectionReadStatus{Fd: new_conn_this_worker.CliFd,
-			ReadEOF:   false,
-			RequestId: reqId,
-			ListenFd:  listen_fd,
-			Upstream:  upstream,
-			SA:        new_conn_this_worker.SA,
+		(*connCliUpstreamInfo)[upstream_fd] = &ConnectionInfoStatus{
+			ConnectionInfo: new_conn_this_worker.ConnectionInfo,
+			ConnectionReadStatus: ConnectionReadStatus{
+				Fd:      new_conn_this_worker.CliFd,
+				ReadEOF: false,
+			},
 		}
+		(*connCliUpstreamInfo)[new_conn_this_worker.CliFd].ConnectionInfo.RequestId = reqId
+		(*connCliUpstreamInfo)[new_conn_this_worker.CliFd].ConnectionInfo.Upstream = upstream
+		(*connCliUpstreamInfo)[upstream_fd].ConnectionInfo.RequestId = reqId
+		(*connCliUpstreamInfo)[upstream_fd].ConnectionInfo.Upstream = upstream
 		mutex.Unlock()
 
 		epfd.add_epoll(upstream_fd)
@@ -396,45 +417,45 @@ func (workerinfo *WorkerInfo) HandleNewConnWorker() {
 	}
 }
 
-func (tcp_listener_upstream_all TcpListenerUpstreamSlice) new_listen_all(epfd_listen FD) {
+func (tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) new_listen_all(epfd_listen FD) {
 	for k, _ := range tcp_listener_upstream_all {
-		listen_fd := tcp_listener_upstream_all[k].Listener.new_listen()
+		listen_fd := tcp_listener_upstream_all[k].IpPortListen.new_listen()
 		epfd_listen.add_epoll(listen_fd)
-		LISTENFD_2_TcpListenerUpstream[listen_fd] = &(tcp_listener_upstream_all[k])
+		ListenFd_2_TcpListenIpPortUpstream[listen_fd] = &(tcp_listener_upstream_all[k])
 	}
 }
 
-func (tcp_listener_upstream_all TcpListenerUpstreamSlice) delete_listen_all(epfd_listen FD) {
+func (tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) delete_listen_all(epfd_listen FD) {
 	for _, tcp_listener_upstream := range tcp_listener_upstream_all {
-		for listenfd, listenfd_tcp_listener_upstream := range LISTENFD_2_TcpListenerUpstream {
-			if tcp_listener_upstream.Listener == listenfd_tcp_listener_upstream.Listener {
+		for listenfd, listenfd_tcp_listener_upstream := range ListenFd_2_TcpListenIpPortUpstream {
+			if tcp_listener_upstream.IpPortListen == listenfd_tcp_listener_upstream.IpPortListen {
 				epfd_listen.del_epoll(listenfd)
 				listenfd.close()
-				delete(LISTENFD_2_TcpListenerUpstream, listenfd)
+				delete(ListenFd_2_TcpListenIpPortUpstream, listenfd)
 				break
 			}
 		}
 	}
 }
 
-func (tcp_listener_upstream_all TcpListenerUpstreamSlice) load_listen(listen_epfd FD) {
-	tcp_listener_upstream_all_add, tcp_listener_upstream_all_del := LastTcpListenerUpstreamAll.compare2tcp_listener_upstream_all(tcp_listener_upstream_all)
+func (tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) load_listen(listen_epfd FD) {
+	tcp_listener_upstream_all_add, tcp_listener_upstream_all_del := LastTcpListenIpPortUpstreamAll.compare2tcp_listener_upstream_all(tcp_listener_upstream_all)
 	tcp_listener_upstream_all_del.delete_listen_all(listen_epfd)
-	LastTcpListenerUpstreamAll = tcp_listener_upstream_all
+	LastTcpListenIpPortUpstreamAll = tcp_listener_upstream_all
 	tcp_listener_upstream_all_add.new_listen_all(listen_epfd)
 }
 
-func (old_tcp_listener_upstream_all TcpListenerUpstreamSlice) compare2tcp_listener_upstream_all(new_tcp_listener_upstream_all TcpListenerUpstreamSlice) (
-	set_add, set_del TcpListenerUpstreamSlice) {
+func (old_tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) compare2tcp_listener_upstream_all(new_tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) (
+	set_add, set_del TcpListenIpPortUpstreamSlice) {
 	for _, old_tcp_listener_upstream := range old_tcp_listener_upstream_all {
 		found_listener := false
 		for _, new_tcp_listener_upstream := range new_tcp_listener_upstream_all {
-			if old_tcp_listener_upstream.Listener == new_tcp_listener_upstream.Listener {
+			if old_tcp_listener_upstream.IpPortListen == new_tcp_listener_upstream.IpPortListen {
 				found_listener = true
-				for listen_fd, listen_fd_tcp_listener_upstream := range LISTENFD_2_TcpListenerUpstream {
-					if new_tcp_listener_upstream.Listener == listen_fd_tcp_listener_upstream.Listener {
-						fmt.Println("updating upstream:", LISTENFD_2_TcpListenerUpstream[listen_fd].Upstream, " -> ", new_tcp_listener_upstream.Upstream)
-						LISTENFD_2_TcpListenerUpstream[listen_fd].Upstream = new_tcp_listener_upstream.Upstream
+				for listen_fd, listen_fd_tcp_listener_upstream := range ListenFd_2_TcpListenIpPortUpstream {
+					if new_tcp_listener_upstream.IpPortListen == listen_fd_tcp_listener_upstream.IpPortListen {
+						fmt.Println("updating upstream:", ListenFd_2_TcpListenIpPortUpstream[listen_fd].Upstream, " -> ", new_tcp_listener_upstream.Upstream)
+						ListenFd_2_TcpListenIpPortUpstream[listen_fd].Upstream = new_tcp_listener_upstream.Upstream
 						break
 					}
 				}
@@ -449,7 +470,7 @@ func (old_tcp_listener_upstream_all TcpListenerUpstreamSlice) compare2tcp_listen
 	for _, new_tcp_listener_upstream := range new_tcp_listener_upstream_all {
 		found_listener := false
 		for _, old_tcp_listener_upstream := range old_tcp_listener_upstream_all {
-			if old_tcp_listener_upstream.Listener == new_tcp_listener_upstream.Listener {
+			if old_tcp_listener_upstream.IpPortListen == new_tcp_listener_upstream.IpPortListen {
 				found_listener = true
 				break
 			}
@@ -460,6 +481,11 @@ func (old_tcp_listener_upstream_all TcpListenerUpstreamSlice) compare2tcp_listen
 		}
 	}
 
+	return
+}
+
+func get_upstreamslice_by_listen_fd(listen_fd FD) (upstream *UpStreamSlice) {
+	upstream = ListenFd_2_TcpListenIpPortUpstream[listen_fd].Upstream
 	return
 }
 
@@ -474,8 +500,8 @@ func new_listen_efd() (listen_epfd FD) {
 
 func StartWorker() {
 	for i := 0; i < WORKERCOUNT; i++ {
-		go (&WorkerInfoAll[i]).TCPProxyWorker()
-		go (&WorkerInfoAll[i]).HandleNewConnWorker()
+		go (&WorkerInfoAll[i]).worker_handle_events()
+		go (&WorkerInfoAll[i]).worker_handle_new_conn()
 	}
 }
 
@@ -497,13 +523,13 @@ func InitWorkerInfoAll() {
 		}
 		worker_info := &(WorkerInfoAll[i])
 		worker_info.EpFd = FD(epfd)
-		conn_cli_upstream_info := make(map[FD]*ConnectionReadStatus, LISTENQUEUECOUNT)
-		worker_info.connCliUpstreamInfo = &conn_cli_upstream_info
-		worker_info.mutex_connCliUpstreamInfo = sync.RWMutex{}
+		conn_cli_upstream_info := make(map[FD]*ConnectionInfoStatus, LISTENQUEUECOUNT)
+		worker_info.ConnectionInfoStatus = &conn_cli_upstream_info
+		worker_info.mutex_ConnectionInfoStatus = sync.RWMutex{}
 		worker_info.events = make([]unix.EpollEvent, LISTENQUEUECOUNT)
 		worker_info.buf = make([]byte, RECV_SIZE)
 		worker_info.pbuf = make([]byte, RECV_SIZE)
-		worker_info.NewConnectionAll = make(chan NewConn, LISTENQUEUECOUNT)
+		worker_info.NewConnectionAll = make(chan NewConnectionInfo, LISTENQUEUECOUNT)
 		worker_info.goroutineIndex = i
 		worker_info.UpstreamReqCount = make(map[FD]int, 0)
 		worker_info.UpstreamCurConnCount = make(map[IpPort]int, 0)

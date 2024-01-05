@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func getListenerUpstream() (tcp_listener_upstream_all TcpListenerUpstreamSlice) {
+func getListenerUpstream() (tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) {
 	upstream_1 := UpStreamSlice{
 		{
 			IpPort: IpPort{
@@ -24,8 +24,8 @@ func getListenerUpstream() (tcp_listener_upstream_all TcpListenerUpstreamSlice) 
 			HealthyUpdateTime: time.Now(),
 		},
 	}
-	listener_upstream_1 := TcpListenerUpstream{
-		Listener: IpPort{
+	listener_upstream_1 := TcpListenIpPortUpstream{
+		IpPortListen: IpPort{
 			Port: 30880,
 			Ip:   [4]byte{0, 0, 0, 0},
 		},
@@ -50,8 +50,8 @@ func getListenerUpstream() (tcp_listener_upstream_all TcpListenerUpstreamSlice) 
 			HealthyUpdateTime: time.Now(),
 		},
 	}
-	listener_upstream_2 := TcpListenerUpstream{
-		Listener: IpPort{
+	listener_upstream_2 := TcpListenIpPortUpstream{
+		IpPortListen: IpPort{
 			Port: 30222,
 			Ip:   [4]byte{0, 0, 0, 0},
 		},
@@ -79,17 +79,42 @@ func test_compare2Maps() {
 
 }
 
+type A struct {
+	m int
+	n int
+}
+
+// func test1(a chan<- NewConnectionInfo) {
+// 	for {
+// 		c := ConnectionInfo{
+// 			ListenFd: 3,
+// 		}
+// 		fmt.Printf("c: %p\n", &c)
+// 		d := NewConnectionInfo{CliFd: FD(2),
+// 			ConnectionInfo: c,
+// 		}
+// 		fmt.Printf("d.ConnectionInfo: %p\n", &(d.ConnectionInfo))
+
+// 		a <- d
+// 		time.Sleep(1 * time.Second)
+// 	}
+// }
+
+// func test2(b <-chan NewConnectionInfo) {
+// 	// var c []*ConnectionInfo = make([]*ConnectionInfo, 0)
+// 	var item  NewConnectionInfo
+// 	for item = range b {
+// 		// c = append(c, &item.ConnectionInfo)
+// 		fmt.Printf("item.ConnectionInfo: %p\n", item.ConnectionInfo)
+// 	}
+// }
+
 func my_temp_test() {
 	// do something
-	// time_1 := time.Now()
-	// time.Sleep(5 * time.Second)
-	// time_2 := time.Now()
+	// a := make(chan NewConnectionInfo, 0)
 
-	// if time_2.Sub(time_1).Seconds() >= 6 {
-	// 	fmt.Println(true)
-	// } else {
-	// 	fmt.Println(false)
-	// }
+	// go test1(a)
+	// test2(a)
 
 	// unix.Exit(0)
 }
