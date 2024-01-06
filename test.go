@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func getListenerUpstream() (tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) {
@@ -79,42 +81,47 @@ func test_compare2Maps() {
 
 }
 
-type A struct {
-	m int
-	n int
+var a []int = make([]int, 2)
+
+const count = 123456
+
+var A []*int = make([]*int, count)
+var B map[int]*int = make(map[int]*int, count)
+
+func test1() {
+	for i := 0; i < count; i++ {
+		A[i] = new(int)
+	}
 }
 
-// func test1(a chan<- NewConnectionInfo) {
-// 	for {
-// 		c := ConnectionInfo{
-// 			ListenFd: 3,
-// 		}
-// 		fmt.Printf("c: %p\n", &c)
-// 		d := NewConnectionInfo{CliFd: FD(2),
-// 			ConnectionInfo: c,
-// 		}
-// 		fmt.Printf("d.ConnectionInfo: %p\n", &(d.ConnectionInfo))
+func test2() {
+	for i := 0; i < count; i++ {
+		A[i] = new(int)
+	}
+}
 
-// 		a <- d
-// 		time.Sleep(1 * time.Second)
-// 	}
-// }
+func test3() {
+	for i := 0; i < count; i++ {
+		B[i] = new(int)
+	}
+}
 
-// func test2(b <-chan NewConnectionInfo) {
-// 	// var c []*ConnectionInfo = make([]*ConnectionInfo, 0)
-// 	var item  NewConnectionInfo
-// 	for item = range b {
-// 		// c = append(c, &item.ConnectionInfo)
-// 		fmt.Printf("item.ConnectionInfo: %p\n", item.ConnectionInfo)
-// 	}
-// }
+func test4() {
+	for i := 0; i < count; i++ {
+		B[i] = new(int)
+	}
+}
 
 func my_temp_test() {
 	// do something
 	// a := make(chan NewConnectionInfo, 0)
 
-	// go test1(a)
-	// test2(a)
+	go test3()
+	test4()
 
-	// unix.Exit(0)
+	for i := 0; i < count; i++ {
+		fmt.Printf("%p\n", B[i])
+	}
+
+	unix.Exit(0)
 }
