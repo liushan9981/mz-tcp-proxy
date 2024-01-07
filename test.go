@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 func getListenerUpstream() (tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) {
@@ -83,14 +81,26 @@ func test_compare2Maps() {
 
 var a []int = make([]int, 2)
 
-const count = 123456
+const count = 100
 
 var A []*int = make([]*int, count)
-var B map[int]*int = make(map[int]*int, count)
+var AA []*[]*int = make([]*[]*int, count)
+
+// var B map[int]*int = make(map[int]*int, count)
+// var B map[int]*int
 
 func test1() {
-	for i := 0; i < count; i++ {
-		A[i] = new(int)
+	last := -1
+	for m := 0; m < count*count; m++ {
+		n := m / count
+		j := m % count
+		if n > last {
+			a := make([]*int, count)
+			AA[n] = &a
+			last = n
+		}
+		(*AA[n])[j] = new(int)
+		*(*AA[n])[j] = m
 	}
 }
 
@@ -100,28 +110,35 @@ func test2() {
 	}
 }
 
-func test3() {
-	for i := 0; i < count; i++ {
-		B[i] = new(int)
+func test11() {
+	for i := 0; i < 10; i++ {
+		A[i+count] = new(int)
 	}
 }
 
-func test4() {
-	for i := 0; i < count; i++ {
-		B[i] = new(int)
-	}
-}
+// func test3() {
+// 	for i := 0; i < count; i++ {
+// 		B[i] = new(int)
+// 	}
+// }
+
+// func test4() {
+// 	for i := 0; i < count; i++ {
+// 		B[i] = new(int)
+// 	}
+// }
 
 func my_temp_test() {
 	// do something
 	// a := make(chan NewConnectionInfo, 0)
 
-	go test3()
-	test4()
+	// test1()
 
-	for i := 0; i < count; i++ {
-		fmt.Printf("%p\n", B[i])
-	}
+	// for m := 0; m < count*count; m++ {
+	// 	n := m / count
+	// 	j := m % count
+	// 	fmt.Printf("n: %d, j: %d, m: %d, %p\n", n, j, m, (*AA[n])[j])
+	// }
 
-	unix.Exit(0)
+	// unix.Exit(0)
 }
