@@ -16,11 +16,16 @@ type ConnectionReadStatus struct {
 }
 
 type ConnectionInfo struct {
-	ListenFd   FD
-	ListenPort int
-	SA         *unix.Sockaddr
-	Upstream   *UpStream
-	RequestId  string
+	ListenFd            FD
+	ListenPort          int
+	SA                  *unix.Sockaddr
+	Upstream            *UpStream
+	RequestId           string
+	CliFd               FD
+	UpstreamFd          FD
+	CliInDataBytes      int
+	UpstreamInDataBytes int
+	StartTime           time.Time
 }
 
 type ConnectionInfoStatus struct {
@@ -58,12 +63,14 @@ type Worker struct {
 	buf                  []byte
 	pbuf                 []byte
 	goroutineIndex       int
-	UpstreamReqCount     map[FD]int // 可能冲突
+	UpstreamReqCount     map[FD]int
 	UpstreamCurConnCount []int
-	// mutex_UpstreamCurConnCount sync.RWMutex
 }
 
+// fd对应的ConnectionInfoStatus，fd转换为int
 type FdConnectionInfoStatus []*ConnectionInfoStatus
+
+// 为了降低内存占用，使用二维slice存储。如果阶梯为10，则1存储为[0][1], 11存储为[1][1]
 type AllFdConnectionInfoStatus []*FdConnectionInfoStatus
 
 const LISTENQUEUECOUNT = 12345
@@ -73,8 +80,7 @@ const UpstreamUnhealthyTimeOut = 300
 const StageCount = 10000
 
 var (
-	WorkerAll [WORKERCOUNT]Worker
-	// TODO test
+	WorkerAll                          [WORKERCOUNT]Worker
 	Upstream_index                     map[IpPort]int = make(map[IpPort]int, LISTENQUEUECOUNT)
 	mutex_Upstream_index               sync.RWMutex
 	NewConnectionAll                   chan NewConnectionInfo          = make(chan NewConnectionInfo, LISTENQUEUECOUNT)
@@ -116,6 +122,22 @@ func (fd FD) close() {
 	}
 }
 
+func (fd FD) write(data *[]byte) (err error) {
+	_, err = unix.Write(int(fd), *data)
+	return
+}
+
+func (cli_fd FD) fin_connect_upstream_err() {
+	err_msg := []byte("connect upstream error")
+	cli_fd.write(&err_msg)
+	cli_fd.close()
+}
+
+func (listen_fd FD) get_upstreamslice_by_listen_fd() (upstream *UpStreamSlice) {
+	upstream = ListenFd_2_TcpListenIpPortUpstream[listen_fd].Upstream
+	return
+}
+
 func (listen_epfd FD) loop_listen() {
 	events_listen := make([]unix.EpollEvent, 1024)
 	for {
@@ -152,6 +174,7 @@ func (listen_epfd FD) loop_listen() {
 						ListenFd:   listen_fd,
 						SA:         &sa,
 						ListenPort: ListenSock.(*unix.SockaddrInet4).Port,
+						StartTime:  time.Now(),
 					},
 				}
 			}
@@ -236,7 +259,14 @@ func (ip_port IpPort) new_listen() (listen_fd FD) {
 func (workerinfo *Worker) fin_request(event_in_fd, event_out_fd FD) {
 	connection_info := event_in_fd.get_ConnectionInfoStatus().ConnectionInfo
 	upstream := connection_info.Upstream
-	fmt.Printf("%s FIN, reqId: %s\n", time.Now().Format("2006-01-02_15:04:05"), connection_info.RequestId)
+	duration := time.Now().Sub(connection_info.StartTime).Milliseconds()
+	fmt.Printf("%s FIN, reqId: %s, in_bytes: %d, out_bytes: %d, duration: %dms\n",
+		time.Now().Format("2006-01-02_15:04:05"),
+		connection_info.RequestId,
+		connection_info.CliInDataBytes,
+		connection_info.UpstreamInDataBytes,
+		duration,
+	)
 	event_out_fd.delete_ConnectionInfoStatus()
 	event_in_fd.delete_ConnectionInfoStatus()
 	event_out_fd.close()
@@ -281,11 +311,16 @@ func (workerinfo *Worker) handle_recv_data(event_in_fd FD) {
 			workerinfo.handle_error_terminate(event_in_fd, event_out_fd)
 		default:
 			fmt.Println("encounter error:", err)
+			workerinfo.handle_error_terminate(event_in_fd, event_out_fd)
 		}
 
 		if need_break {
 			break
 		}
+
+		connection_info := event_in_fd.get_ConnectionInfoStatus()
+		// debug
+		fmt.Printf("debug: reqId: %s, read_n: %d\n", connection_info.RequestId, n)
 
 		// EOF
 		if n == 0 {
@@ -302,12 +337,24 @@ func (workerinfo *Worker) handle_recv_data(event_in_fd FD) {
 		} else if n > 0 {
 			// read ok
 			*pbuf = (*buf)[0:n]
-			write_count, err := unix.Write(int(event_out_fd), *pbuf)
+
+			connection_info := event_in_fd.get_ConnectionInfoStatus()
+			// debug
+			// fmt.Printf("debug: reqId: %s, read_n: %d\n", connection_info.RequestId, n)
+
+			switch event_in_fd {
+			case connection_info.CliFd:
+				connection_info.CliInDataBytes += n
+			case connection_info.UpstreamFd:
+				connection_info.UpstreamInDataBytes += n
+			default:
+				fmt.Println("my debug, event_in_fd:", event_in_fd, "connection_info.CliFd:", connection_info.CliFd, "connection_info.UpstreamFd:", connection_info.UpstreamFd)
+			}
+
+			err := event_out_fd.write(pbuf)
+
 			if err != nil {
 				fmt.Println("write error:", err)
-			}
-			if write_count != n {
-				fmt.Println("warning write_count != n", write_count, n)
 			}
 		}
 	}
@@ -338,7 +385,7 @@ func (workerinfo *Worker) worker_handle_events() {
 }
 
 func (workerinfo *Worker) get_upstream_rr(new_conn_this_worker NewConnectionInfo) (upstream *UpStream) {
-	upstream_all := get_upstreamslice_by_listen_fd(new_conn_this_worker.ListenFd)
+	upstream_all := new_conn_this_worker.ListenFd.get_upstreamslice_by_listen_fd()
 	upstream_all_healthy := make([]*UpStream, 0)
 	listen_fd := new_conn_this_worker.ListenFd
 	upstream_all_req_count := workerinfo.UpstreamReqCount
@@ -400,6 +447,11 @@ func (workerinfo *Worker) worker_handle_new_conn() {
 			}
 		}
 
+		if err != nil {
+			new_conn_this_worker.CliFd.fin_connect_upstream_err()
+			break
+		}
+
 		reqId := fmt.Sprintf("%d-%d", workerinfo.goroutineIndex, workerinfo.UpstreamReqCount[listen_fd])
 
 		fmt.Printf("%s goroutine: %d, NEW reqId: %s, ListenFd: %d, ListenPort: %d, Upstream: %v, %d -> srv -> %d, client: %v, connectioninfo: %p\n",
@@ -416,6 +468,9 @@ func (workerinfo *Worker) worker_handle_new_conn() {
 		)
 
 		var connCliInfo, connUpstreamInfo ConnectionInfoStatus
+
+		new_conn_this_worker.ConnectionInfo.CliFd = new_conn_this_worker.CliFd
+		new_conn_this_worker.ConnectionInfo.UpstreamFd = upstream_fd
 
 		connCliInfo = ConnectionInfoStatus{
 			ConnectionInfo: new_conn_this_worker.ConnectionInfo,
@@ -523,11 +578,6 @@ func (old_tcp_listener_upstream_all TcpListenIpPortUpstreamSlice) compare2tcp_li
 	return
 }
 
-func get_upstreamslice_by_listen_fd(listen_fd FD) (upstream *UpStreamSlice) {
-	upstream = ListenFd_2_TcpListenIpPortUpstream[listen_fd].Upstream
-	return
-}
-
 func new_listen_efd() (listen_epfd FD) {
 	listen_epfd_int, err := unix.EpollCreate1(0)
 	if err != nil {
@@ -606,8 +656,6 @@ idea:
 	暴露prometheus exporter
 	日志
 		打印到文件，同时支持打印到标准输出，日志分级
-		打印处理时长
-		打印发送和接收字节数
 		重新考虑是否结束时打印日志
 优化：
 	考虑哪些场景使用interface
@@ -615,8 +663,11 @@ idea:
 
 Done:
 	动态加载监听端口
-	2024-01-02 日志增加时间
+	日志增加时间
 	处理客户端rst的情况
 	处理连接到上游异常的情况
 		增加超时重置异常为正常
+	日志
+		打印处理时长
+		打印发送和接收字节数
 */
